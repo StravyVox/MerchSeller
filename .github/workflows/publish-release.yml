@@ -10,15 +10,16 @@ permissions:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Получить исходный код
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Установить JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17'
+          cache: gradle
       - name: Проверить номер версии
         id: version
         shell: bash
@@ -64,7 +65,7 @@ jobs:
         shell: bash
         run: cp app/build/outputs/apk/release/app-release.apk "MerchSeller-${GITHUB_REF_NAME}.apk"
       - name: Опубликовать GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           name: MerchSeller ${{ steps.version.outputs.name }}
           generate_release_notes: true
