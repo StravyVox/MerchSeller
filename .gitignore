@@ -1,0 +1,28 @@
+# Gradle и Android Studio
+.gradle/
+build/
+**/build/
+.idea/
+*.iml
+local.properties
+.codebase-memory/
+
+# Локальные файлы сборки и подписи
+*.apk
+*.aab
+*.ap_
+*.keystore
+*.jks
+keystore.properties
+
+# Системные и временные файлы
+.DS_Store
+Thumbs.db
+*.log
+captures/
+externalNativeBuild/
+.cxx/
+
+# Конфиденциальные настройки
+google-services.json
+secrets.properties
