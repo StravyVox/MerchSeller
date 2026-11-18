@@ -4,7 +4,6 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.merchseller.data.*
-import android.content.Context
 import android.net.Uri
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -13,49 +12,121 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import java.math.BigInteger
 
 class MerchViewModel(application: Application) : AndroidViewModel(application) {
     private val dao = AppDatabase.create(application).dao()
-    val products = dao.products().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    val products: StateFlow<Result<List<Product>>?> = dao.products()
+        .map { Result.success(it) }
+        .catch { emit(Result.failure(it)) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
     val categories = dao.categories().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val sales = dao.sales().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
-    val todayTurnover = dao.turnover(todayStart()).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0.0)
-    val todaySales = dao.salesCount(todayStart()).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
+    val todayMetrics = dao.receiptTotals(todayStart()).map { receipts ->
+        val turnover = receipts.fold(BigInteger.ZERO) { total, amount -> total.add(amount.toBigInteger()) }
+        turnover to receipts.size
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), BigInteger.ZERO to 0)
 
     private val _draft = MutableStateFlow<List<DraftLine>>(emptyList())
     val draft: StateFlow<List<DraftLine>> = _draft.asStateFlow()
+    private val saleCloseMutex = Mutex()
+    private val catalogMutex = Mutex()
+    private val _isClosingSale = MutableStateFlow(false)
+    val isClosingSale: StateFlow<Boolean> = _isClosingSale.asStateFlow()
     private val _lastClosed = MutableStateFlow<Sale?>(null)
     val lastClosed: StateFlow<Sale?> = _lastClosed.asStateFlow()
     private val _update = MutableStateFlow<UpdateState>(UpdateState.Idle)
     val update = _update.asStateFlow()
 
-    fun saveProduct(product: Product) = viewModelScope.launch { dao.saveProduct(product) }
-    fun deleteProduct(product: Product) = viewModelScope.launch { dao.deleteProduct(product.id) }
-    fun addCategory(name: String) = viewModelScope.launch { if (name.isNotBlank()) dao.saveCategory(Category(name = name.trim())) }
-    fun addSku(sku: String, onMissing: () -> Unit = {}) = viewModelScope.launch {
-        val product = dao.bySku(sku.trim())
-        if (product == null) onMissing() else addToDraft(product)
-    }
-    fun addToDraft(product: Product) {
-        if (product.stock <= 0) return
-        _draft.value = _draft.value.toMutableList().apply {
-            val index = indexOfFirst { it.product.id == product.id }
-            if (index < 0) add(DraftLine(product, 1)) else if (this[index].quantity < product.stock) this[index] = this[index].copy(quantity = this[index].quantity + 1)
+    fun saveProduct(product: Product, done: (Result<Unit>) -> Unit) = catalogAction(done) {
+        if (product.id == 0L) dao.insertProduct(product)
+        else {
+            val oldPhoto = dao.product(product.id)?.photoUri
+            check(dao.updateProduct(product) == 1)
+            if (oldPhoto != product.photoUri) deleteUnusedPhoto(oldPhoto)
         }
     }
+
+    fun deleteProduct(product: Product, done: (Result<Unit>) -> Unit) = catalogAction(done) {
+        val photo = dao.product(product.id)?.photoUri
+        dao.deleteProduct(product.id)
+        _draft.update { lines -> lines.filterNot { it.product.id == product.id } }
+        deleteUnusedPhoto(photo)
+    }
+
+    private suspend fun deleteUnusedPhoto(uri: String?) {
+        if (uri != null && !dao.usesPhoto(uri)) withContext(Dispatchers.IO) {
+            BackupPhotos(getApplication()).deleteRestored(uri)
+        }
+    }
+
+    fun addCategory(name: String, done: (Result<Unit>) -> Unit) = catalogAction(done) {
+        dao.saveCategory(Category(name = name.trim()))
+    }
+
+    private fun catalogAction(done: (Result<Unit>) -> Unit, action: suspend () -> Unit) = viewModelScope.launch {
+        val result = try {
+            catalogMutex.withLock { action() }
+            Result.success(Unit)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            Result.failure(error)
+        }
+        done(result)
+    }
+
+    fun addSku(sku: String, done: (String?) -> Unit) = viewModelScope.launch {
+        val product = dao.bySku(sku.trim())
+        done(when {
+            product == null -> "Товар с таким кодом не найден."
+            product.stock <= 0 -> "Товара нет в наличии."
+            !addToDraft(product) -> "В чек уже добавлен весь доступный остаток."
+            else -> null
+        })
+    }
+    fun addToDraft(product: Product): Boolean {
+        if (saleCloseMutex.isLocked || product.stock <= 0) return false
+        if ((_draft.value.firstOrNull { it.product.id == product.id }?.quantity ?: 0) >= product.stock) return false
+        _draft.value = _draft.value.toMutableList().apply {
+            val index = indexOfFirst { it.product.id == product.id }
+            if (index < 0) add(DraftLine(product, 1))
+            else this[index] = DraftLine(product, this[index].quantity + 1)
+        }
+        return true
+    }
     fun changeDraft(productId: Long, delta: Int) {
+        if (saleCloseMutex.isLocked) return
         _draft.value = _draft.value.mapNotNull {
             if (it.product.id != productId) it else (it.quantity + delta).takeIf { q -> q > 0 }?.let { q -> it.copy(quantity = q.coerceAtMost(it.product.stock)) }
         }
     }
     fun clearDraft() { _draft.value = emptyList() }
-    fun closeSale(payment: PaymentType, note: String, completed: () -> Unit) = viewModelScope.launch {
-        val lines = _draft.value
-        if (lines.isEmpty()) return@launch
-        val id = dao.closeSale(payment, lines, note)
-        _lastClosed.value = Sale(id = id, paymentType = payment, total = lines.sumOf { it.product.totalPrice * it.quantity }, note = note)
-        _draft.value = emptyList()
-        completed()
+    fun closeSale(payment: PaymentType, note: String, completed: () -> Unit, failed: (String) -> Unit) = viewModelScope.launch {
+        // Блокировка берётся до первого приостановленного вызова, чтобы быстрые повторные нажатия не создали второй чек.
+        if (!saleCloseMutex.tryLock()) return@launch
+        _isClosingSale.value = true
+        try {
+            val lines = _draft.value
+            if (lines.isEmpty()) return@launch
+            _lastClosed.value = dao.closeSale(payment, lines, note)
+            _draft.value = emptyList()
+            completed()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            failed(error.message ?: "Не удалось закрыть чек")
+        } finally {
+            _isClosingSale.value = false
+            saleCloseMutex.unlock()
+        }
     }
     fun updateSale(saleId: Long, payment: PaymentType, note: String) = viewModelScope.launch { dao.updateSale(saleId, payment, note) }
     suspend fun saleLines(id: Long) = dao.lines(id)
@@ -79,12 +150,31 @@ class MerchViewModel(application: Application) : AndroidViewModel(application) {
             .onFailure { error -> _update.value = UpdateState.Failed(error.message ?: "Не удалось загрузить обновление") }
     }
     fun dismissUpdate() { _update.value = UpdateState.Idle }
-    fun exportBackup(context: Context, uri: Uri, done: (Result<Unit>) -> Unit) = viewModelScope.launch {
-        // Работа с файлом идёт вне интерфейса и не блокирует кассу.
-        runCatching { BackupManager.export(context.contentResolver, uri, dao) }.also(done)
-    }
-    fun importBackup(context: Context, uri: Uri, done: (Result<Unit>) -> Unit) = viewModelScope.launch {
-        runCatching { BackupManager.import(context.contentResolver, uri, dao) }.also(done)
+    fun exportLabels(uri: Uri, products: List<Product>, options: LabelOptions, done: (Result<Unit>) -> Unit) =
+        catalogAction(done) {
+            withContext(Dispatchers.IO) { PdfLabelsExporter.export(getApplication(), uri, products, options) }
+        }
+
+    fun exportBackup(uri: Uri, includePhotos: Boolean, done: (Result<Unit>) -> Unit) =
+        catalogAction(done) { BackupManager.export(getApplication(), uri, dao, includePhotos) }
+
+    fun importBackup(uri: Uri, done: (Result<Unit>) -> Unit) = viewModelScope.launch {
+        if (!saleCloseMutex.tryLock()) {
+            done(Result.failure(IllegalStateException("Дождитесь сохранения продажи.")))
+            return@launch
+        }
+        val result = try {
+            catalogMutex.withLock { BackupManager.import(getApplication(), uri, dao) }
+            clearDraft()
+            Result.success(Unit)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            Result.failure(error)
+        } finally {
+            saleCloseMutex.unlock()
+        }
+        done(result)
     }
     private fun todayStart(): Long = java.util.Calendar.getInstance().apply { set(java.util.Calendar.HOUR_OF_DAY, 0); set(java.util.Calendar.MINUTE, 0); set(java.util.Calendar.SECOND, 0); set(java.util.Calendar.MILLISECOND, 0) }.timeInMillis
 }

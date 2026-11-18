@@ -20,6 +20,7 @@ import androidx.core.content.ContextCompat
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.common.InputImage
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 @Composable
 fun ScannerDialog(onCode: (String) -> Unit, onDismiss: () -> Unit) {
@@ -35,22 +36,56 @@ fun ScannerDialog(onCode: (String) -> Unit, onDismiss: () -> Unit) {
 @SuppressLint("UnsafeOptInUsageError")
 @Composable private fun BarcodeCamera(modifier: Modifier, onCode: (String) -> Unit) {
     val context = LocalContext.current; val lifecycle = LocalLifecycleOwner.current
+    val active = remember { AtomicBoolean(true) }
+    val codeReported = remember { AtomicBoolean(false) }
+    val analyzerExecutor = remember { Executors.newSingleThreadExecutor() }
+    var cameraProvider by remember { mutableStateOf<ProcessCameraProvider?>(null) }
+    var barcodeScanner by remember { mutableStateOf<com.google.mlkit.vision.barcode.BarcodeScanner?>(null) }
     AndroidView(factory = { ctx ->
         PreviewView(ctx).also { previewView ->
             val providerFuture = ProcessCameraProvider.getInstance(ctx)
             providerFuture.addListener({
                 val provider = providerFuture.get()
-                val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
                 val scanner = BarcodeScanning.getClient()
+                if (!active.get()) {
+                    scanner.close()
+                    return@addListener
+                }
+                cameraProvider = provider
+                barcodeScanner = scanner
+                val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
                 // Не накапливаем старые кадры: для кассы важнее быстро прочитать актуальный QR-код.
-                val analysis = ImageAnalysis.Builder().setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).build().also { analyzer ->
-                    analyzer.setAnalyzer(Executors.newSingleThreadExecutor()) { imageProxy ->
+                val analysis = ImageAnalysis.Builder().setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).build().also { useCase ->
+                    useCase.setAnalyzer(analyzerExecutor) { imageProxy ->
                         val media = imageProxy.image
-                        if (media == null) imageProxy.close() else scanner.process(InputImage.fromMediaImage(media, imageProxy.imageInfo.rotationDegrees)).addOnSuccessListener { codes -> codes.firstOrNull { !it.rawValue.isNullOrBlank() }?.rawValue?.let(onCode) }.addOnCompleteListener { imageProxy.close() }
+                        if (media == null) {
+                            imageProxy.close()
+                        } else {
+                            runCatching { scanner.process(InputImage.fromMediaImage(media, imageProxy.imageInfo.rotationDegrees)) }
+                                .onSuccess { task ->
+                                    task.addOnSuccessListener { codes ->
+                                        val value = codes.firstOrNull { !it.rawValue.isNullOrBlank() }?.rawValue
+                                        // Анализатор мог увидеть один код в нескольких соседних кадрах.
+                                        if (value != null && active.get() && codeReported.compareAndSet(false, true)) {
+                                            useCase.clearAnalyzer()
+                                            ContextCompat.getMainExecutor(ctx).execute { if (active.get()) onCode(value) }
+                                        }
+                                    }.addOnCompleteListener { imageProxy.close() }
+                                }
+                                .onFailure { imageProxy.close() }
+                        }
                     }
                 }
                 provider.unbindAll(); provider.bindToLifecycle(lifecycle, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
             }, ContextCompat.getMainExecutor(ctx))
         }
     }, modifier = modifier)
+    DisposableEffect(lifecycle) {
+        onDispose {
+            active.set(false)
+            cameraProvider?.unbindAll()
+            barcodeScanner?.close()
+            analyzerExecutor.shutdownNow()
+        }
+    }
 }

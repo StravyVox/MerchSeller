@@ -33,7 +33,7 @@ sealed interface UpdateState {
 
 /**
  * Проверка и загрузка обновлений из публичных релизов этого репозитория.
- * APK дополнительно сверяется с SHA-256, который GitHub возвращает для каждого asset.
+ * APK сверяется с SHA-256, если GitHub API передал контрольную сумму файла.
  */
 object GitHubUpdateManager {
     private const val MAX_APK_SIZE = 250L * 1024 * 1024

@@ -7,8 +7,8 @@
     </style>
     <!-- Системная заставка Android 12+ плавно передаёт экран в Compose-интерфейс. -->
     <style name="Theme.MerchSeller.Starting" parent="Theme.SplashScreen">
-        <item name="windowSplashScreenBackground">#0A1533</item>
-        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_sell_product_foreground</item>
+        <item name="windowSplashScreenBackground">@color/launcher_background</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/tabler_trolley_filled</item>
         <item name="postSplashScreenTheme">@style/Theme.MerchSeller</item>
     </style>
 </resources>

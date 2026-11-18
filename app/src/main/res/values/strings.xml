@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <plurals name="receipt_count">
+        <item quantity="one">%d чек</item>
+        <item quantity="few">%d чека</item>
+        <item quantity="many">%d чеков</item>
+        <item quantity="other">%d чека</item>
+    </plurals>
+</resources>

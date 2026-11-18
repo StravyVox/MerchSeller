@@ -23,13 +23,13 @@ data class Product(
     val name: String,
     val description: String = "",
     val categoryId: Long? = null,
-    val price: Double,
+    val priceKopecks: Long,
     val vatRate: Double = 20.0,
     val stock: Int = 0,
     val photoUri: String? = null,
     val updatedAt: Long = System.currentTimeMillis()
 ) {
-    val totalPrice get() = price * (1 + vatRate / 100)
+    val totalPriceKopecks get() = kopecksWithVat(priceKopecks, vatRate)
 }
 
 @Entity(tableName = "sales", indices = [Index(value = ["createdAt"])])
@@ -37,7 +37,7 @@ data class Sale(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val createdAt: Long = System.currentTimeMillis(),
     val paymentType: PaymentType,
-    val total: Double,
+    val totalKopecks: Long,
     val note: String = ""
 )
 
@@ -48,9 +48,10 @@ data class SaleLine(
     val productId: Long,
     val productName: String,
     val sku: String,
-    val unitPrice: Double,
+    val unitPriceKopecks: Long,
     val vatRate: Double,
-    val quantity: Int
+    val quantity: Int,
+    val lineTotalKopecks: Long
 )
 
 enum class PaymentType { CASH, CARD }

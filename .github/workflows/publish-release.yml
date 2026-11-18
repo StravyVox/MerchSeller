@@ -1,44 +1,160 @@
 name: Publish Android release
 
 on:
-  push:
-    tags:
-      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Тег стабильного релиза, например v1.2.3
+        required: true
+        type: string
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: android-release-${{ inputs.tag }}
+  cancel-in-progress: false
 
 jobs:
-  release:
+  validate:
+    # Всегда используем workflow из защищённой основной ветки, а не YAML из тега.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+      version_code: ${{ steps.release.outputs.version_code }}
+      commit: ${{ steps.release.outputs.commit }}
     steps:
-      - name: Получить исходный код
-        uses: actions/checkout@v7
-      - name: Установить JDK 17
-        uses: actions/setup-java@v6
+      - name: Получить основную ветку
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          distribution: temurin
-          java-version: '17'
-          cache: gradle
-      - name: Проверить номер версии
-        id: version
+          ref: main
+          fetch-depth: 0
+
+      - name: Проверить тег и версию
+        id: release
         shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
         run: |
-          if [[ "$GITHUB_REF_NAME" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
-            major="${BASH_REMATCH[1]}"
-            minor="${BASH_REMATCH[2]}"
-            patch="${BASH_REMATCH[3]}"
-          else
-            echo "Тег должен иметь формат vMAJOR.MINOR.PATCH, например v1.2.3" >&2
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Укажите тег в формате vMAJOR.MINOR.PATCH, например v1.2.3" >&2
             exit 1
           fi
+
+          major="${BASH_REMATCH[1]}"
+          minor="${BASH_REMATCH[2]}"
+          patch="${BASH_REMATCH[3]}"
           if (( major > 2099 || minor > 999 || patch > 999 )); then
             echo "Компонент версии превышает допустимый диапазон" >&2
             exit 1
           fi
-          echo "name=${major}.${minor}.${patch}" >> "$GITHUB_OUTPUT"
-          echo "code=$((major * 1000000 + minor * 1000 + patch))" >> "$GITHUB_OUTPUT"
-      - name: Подготовить ключ подписи
+
+          git fetch --force --no-tags origin "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+          git fetch --force --no-tags origin "refs/heads/main:refs/remotes/origin/main"
+          commit="$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
+          if ! git merge-base --is-ancestor "$commit" refs/remotes/origin/main; then
+            echo "Тег должен указывать на коммит, уже вошедший в main" >&2
+            exit 1
+          fi
+
+          version="${major}.${minor}.${patch}"
+          version_code=$((major * 1000000 + minor * 1000 + patch))
+          if (( version_code < 1 )); then
+            echo "Номер версии Android должен быть больше нуля" >&2
+            exit 1
+          fi
+          {
+            echo "tag=${RELEASE_TAG}"
+            echo "version=${version}"
+            echo "version_code=${version_code}"
+            echo "commit=${commit}"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: validate
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Получить проверенный исходный код
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          path: source
+          persist-credentials: false
+
+      - name: Установить JDK 17
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Установить Android SDK Platform 36
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk_root="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          "$sdk_root/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-36" "build-tools;36.0.0"
+
+      # Код тега выполняется только в этой изолированной задаче: ключа подписи и права публикации здесь нет.
+      - name: Собрать неподписанный APK
+        working-directory: source
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_VERSION_CODE: ${{ needs.validate.outputs.version_code }}
+        run: ./gradlew assembleRelease --no-daemon -PreleaseVersion="$RELEASE_VERSION" -PreleaseVersionCode="$RELEASE_VERSION_CODE"
+
+      - name: Передать APK на отдельную подпись
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        with:
+          name: unsigned-release-apk
+          path: source/app/build/outputs/apk/release/app-release-unsigned.apk
+          if-no-files-found: error
+          retention-days: 1
+
+  sign:
+    needs: [validate, build]
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      - name: Получить неподписанный APK
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3
+        with:
+          name: unsigned-release-apk
+          path: unsigned
+
+      - name: Проверить пакет, версию и размер APK
+        id: apk
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_VERSION_CODE: ${{ needs.validate.outputs.version_code }}
+        run: |
+          set -euo pipefail
+          apk="unsigned/app-release-unsigned.apk"
+          [[ -f "$apk" ]]
+          size="$(stat -c '%s' "$apk")"
+          if (( size < 1 || size > 250 * 1024 * 1024 )); then
+            echo "Размер APK вне допустимого диапазона" >&2
+            exit 1
+          fi
+
+          sdk_root="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          build_tools="$(find "$sdk_root/build-tools" -mindepth 1 -maxdepth 1 -type d -print | sort -V | tail -n 1)"
+          [[ -x "$build_tools/aapt" && -x "$build_tools/apksigner" ]]
+          badging="$("$build_tools/aapt" dump badging "$apk")"
+          expected="package: name='com.merchseller' versionCode='${RELEASE_VERSION_CODE}' versionName='${RELEASE_VERSION}'"
+          if ! grep -Fq "$expected" <<< "$badging"; then
+            echo "APK не соответствует приложению или версии указанного тега" >&2
+            exit 1
+          fi
+          echo "build_tools=${build_tools}" >> "$GITHUB_OUTPUT"
+
+      - name: Подготовить закрытый ключ
         shell: bash
         env:
           SIGNING_KEY_BASE64: ${{ secrets.MERCHSELLER_SIGNING_KEY_BASE64 }}
@@ -46,28 +162,94 @@ jobs:
           SIGNING_KEY_ALIAS: ${{ secrets.MERCHSELLER_SIGNING_KEY_ALIAS }}
           SIGNING_KEY_PASSWORD: ${{ secrets.MERCHSELLER_SIGNING_KEY_PASSWORD }}
         run: |
+          set -euo pipefail
           if [[ -z "$SIGNING_KEY_BASE64" || -z "$SIGNING_STORE_PASSWORD" || -z "$SIGNING_KEY_ALIAS" || -z "$SIGNING_KEY_PASSWORD" ]]; then
-            echo "Добавьте четыре секрета подписи из раздела выпуска релизов README.md" >&2
+            echo "Добавьте четыре секрета подписи в окружение release" >&2
             exit 1
           fi
-          echo "$SIGNING_KEY_BASE64" | base64 --decode > "$RUNNER_TEMP/merchseller-release.jks"
-      - name: Собрать подписанный APK
-        run: >-
-          ./gradlew assembleRelease --no-daemon
-          -PreleaseVersion=${{ steps.version.outputs.name }}
-          -PreleaseVersionCode=${{ steps.version.outputs.code }}
-        env:
-          ORG_GRADLE_PROJECT_releaseStoreFile: ${{ runner.temp }}/merchseller-release.jks
-          ORG_GRADLE_PROJECT_releaseStorePassword: ${{ secrets.MERCHSELLER_SIGNING_STORE_PASSWORD }}
-          ORG_GRADLE_PROJECT_releaseKeyAlias: ${{ secrets.MERCHSELLER_SIGNING_KEY_ALIAS }}
-          ORG_GRADLE_PROJECT_releaseKeyPassword: ${{ secrets.MERCHSELLER_SIGNING_KEY_PASSWORD }}
-      - name: Подготовить APK для публикации
+          umask 077
+          printf '%s' "$SIGNING_KEY_BASE64" | base64 --decode > "$RUNNER_TEMP/merchseller-release.jks"
+
+      - name: Подписать и проверить APK
         shell: bash
-        run: cp app/build/outputs/apk/release/app-release.apk "MerchSeller-${GITHUB_REF_NAME}.apk"
-      - name: Опубликовать GitHub Release
-        uses: softprops/action-gh-release@v3
+        env:
+          SIGNING_STORE_PASSWORD: ${{ secrets.MERCHSELLER_SIGNING_STORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.MERCHSELLER_SIGNING_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.MERCHSELLER_SIGNING_KEY_PASSWORD }}
+          APKSIGNER: ${{ steps.apk.outputs.build_tools }}/apksigner
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          output="release/MerchSeller-${RELEASE_TAG}.apk"
+          mkdir -p release
+          "$APKSIGNER" sign \
+            --ks "$RUNNER_TEMP/merchseller-release.jks" \
+            --ks-key-alias "$SIGNING_KEY_ALIAS" \
+            --ks-pass env:SIGNING_STORE_PASSWORD \
+            --key-pass env:SIGNING_KEY_PASSWORD \
+            --out "$output" \
+            unsigned/app-release-unsigned.apk
+          "$APKSIGNER" verify --verbose "$output"
+
+      - name: Удалить временный ключ подписи
+        if: always()
+        run: rm -f "$RUNNER_TEMP/merchseller-release.jks"
+
+      - name: Передать подписанный APK на публикацию
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
         with:
-          name: MerchSeller ${{ steps.version.outputs.name }}
-          generate_release_notes: true
-          files: MerchSeller-${{ github.ref_name }}.apk
-          make_latest: true
+          name: signed-release-apk
+          path: release/MerchSeller-${{ needs.validate.outputs.tag }}.apk
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: [validate, sign]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Получить подписанный APK
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3
+        with:
+          name: signed-release-apk
+          path: release
+
+      - name: Проверить тег и опубликовать GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          EXPECTED_COMMIT: ${{ needs.validate.outputs.commit }}
+        run: |
+          set -euo pipefail
+          tag_ref="refs/tags/${RELEASE_TAG}"
+          refs="$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" "$tag_ref" "${tag_ref}^{}")"
+          actual_commit=""
+          while IFS=$'\t' read -r commit ref; do
+            if [[ "$ref" == "${tag_ref}^{}" ]]; then
+              actual_commit="$commit"
+              break
+            fi
+            if [[ "$ref" == "$tag_ref" ]]; then
+              actual_commit="$commit"
+            fi
+          done <<< "$refs"
+          if [[ "$actual_commit" != "$EXPECTED_COMMIT" ]]; then
+            echo "Тег изменился после проверки; релиз не опубликован" >&2
+            exit 1
+          fi
+
+          apk="release/MerchSeller-${RELEASE_TAG}.apk"
+          [[ -s "$apk" ]]
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$apk" --clobber --repo "$GITHUB_REPOSITORY"
+            gh release edit "$RELEASE_TAG" --title "MerchSeller ${RELEASE_VERSION}" --latest --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$RELEASE_TAG" "$apk" \
+              --title "MerchSeller ${RELEASE_VERSION}" \
+              --generate-notes \
+              --latest \
+              --repo "$GITHUB_REPOSITORY"
+          fi

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <!-- База содержит товарный справочник и историю продаж. Её переносит пользовательский JSON-экспорт. -->
+    <exclude domain="database" path="." />
+</full-backup-content>
