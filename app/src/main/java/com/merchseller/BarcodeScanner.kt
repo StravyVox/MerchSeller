@@ -10,6 +10,7 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
+import com.merchseller.ui.QuietAction
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -30,7 +31,7 @@ fun ScannerDialog(onCode: (String) -> Unit, onDismiss: () -> Unit) {
     LaunchedEffect(Unit) { if (!granted) request.launch(Manifest.permission.CAMERA) }
     AlertDialog(onDismissRequest = onDismiss, title = { Text("Сканирование кода") }, text = {
         if (granted) BarcodeCamera(Modifier.fillMaxWidth().height(330.dp), onCode) else Text("Для сканирования нужен доступ к камере. Разрешите его в настройках телефона.")
-    }, confirmButton = { TextButton(onClick = onDismiss) { Text("Закрыть") } })
+    }, confirmButton = { QuietAction(onClick = onDismiss) { Text("Закрыть") } })
 }
 
 @SuppressLint("UnsafeOptInUsageError")
