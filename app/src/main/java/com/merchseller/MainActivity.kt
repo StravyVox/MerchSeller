@@ -24,7 +24,9 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
@@ -32,6 +34,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -41,8 +44,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.layout.ContentScale
@@ -52,6 +57,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -69,6 +75,7 @@ import java.text.NumberFormat
 import java.util.Date
 import java.util.Locale
 import java.io.File
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -100,6 +107,7 @@ private enum class Tab(val title: String, val icon: Int) {
     val receipt by vm.lastClosed.collectAsState()
     val update by vm.update.collectAsState()
     val context = LocalContext.current
+    val wideLayout = LocalConfiguration.current.screenWidthDp >= 600
     val activity = context as? Activity
     val installerPermission = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         val apk = pendingInstallFile
@@ -126,28 +134,54 @@ private enum class Tab(val title: String, val icon: Int) {
         }
     }
     Scaffold(containerColor = Color.Transparent, bottomBar = {
-        if (productEditor == null) {
+        if (productEditor == null && !wideLayout) {
             NavigationBar(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = .96f), tonalElevation = 10.dp) {
-                Tab.entries.forEach { item -> NavigationBarItem(selected = tab == item, onClick = { tab = item }, icon = { Glyph(item.icon) }, label = { Text(item.title) }) }
+                Tab.entries.forEach { item ->
+                    NavigationBarItem(
+                        selected = tab == item,
+                        onClick = { tab = item },
+                        icon = { Glyph(item.icon, item.title) },
+                        label = { Text(item.title) }
+                    )
+                }
             }
         }
     }) { pad ->
-        Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).padding(pad).consumeWindowInsets(pad)) {
-            // Переходы между разделами делают навигацию живой, но не отвлекают от работы кассира.
-            AnimatedContent(
-                tab,
-                transitionSpec = { fadeIn(tween(160)) togetherWith fadeOut(tween(100)) },
-                label = "section"
-            ) { current ->
-                when (current) {
-                    Tab.STOCK -> StockScreen(vm, productEditor) { productEditor = it }
-                    Tab.PRODUCTS -> ProductScreen(vm, productEditor) { productEditor = it }
-                    Tab.SALE -> SaleScreen(vm)
-                    Tab.HISTORY -> HistoryScreen(vm)
-                    Tab.ANALYTICS -> AnalyticsScreen(vm)
+        Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+            Row(Modifier.fillMaxSize()) {
+                if (productEditor == null && wideLayout) {
+                    NavigationRail(containerColor = MaterialTheme.colorScheme.surface) {
+                        Tab.entries.forEach { item ->
+                            NavigationRailItem(
+                                selected = tab == item,
+                                onClick = { tab = item },
+                                icon = { Glyph(item.icon, item.title) },
+                                label = { Text(item.title) },
+                                alwaysShowLabel = true
+                            )
+                        }
+                    }
+                }
+                Box(Modifier.weight(1f).fillMaxHeight().background(MaterialTheme.colorScheme.background).padding(pad).consumeWindowInsets(pad)) {
+                    // Переходы между разделами делают навигацию живой, но не отвлекают от работы кассира.
+                    AnimatedContent(
+                        tab,
+                        transitionSpec = { fadeIn(tween(160)) togetherWith fadeOut(tween(100)) },
+                        label = "section"
+                    ) { current ->
+                        when (current) {
+                            Tab.STOCK -> StockScreen(vm, productEditor) { productEditor = it }
+                            Tab.PRODUCTS -> ProductScreen(vm, productEditor) { productEditor = it }
+                            Tab.SALE -> SaleScreen(vm)
+                            Tab.HISTORY -> HistoryScreen(vm)
+                            Tab.ANALYTICS -> AnalyticsScreen(vm)
+                        }
+                    }
                 }
             }
-            AnimatedVisibility(receipt != null, enter = scaleIn(spring(stiffness = Spring.StiffnessLow)), exit = scaleOut()) { receipt?.let { ReceiptClosed(it) { vm.dismissReceipt() } } }
+            AnimatedVisibility(receipt != null, enter = scaleIn(spring(stiffness = Spring.StiffnessLow)), exit = scaleOut()) {
+                receipt?.let { ReceiptClosed(it) { vm.dismissReceipt() } }
+            }
         }
     }
     when (val state = update) {
@@ -192,22 +226,29 @@ private fun launchApkInstaller(activity: Activity, apk: File) {
     modifier: Modifier = Modifier,
     body: @Composable ColumnScope.() -> Unit
 ) {
-    Column(modifier.fillMaxSize().padding(horizontal = 18.dp)) {
-        Spacer(Modifier.height(18.dp))
-        Text(title, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-        subtitle?.let { Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-        Spacer(Modifier.height(16.dp))
-        body()
+    BoxWithConstraints(modifier.fillMaxSize()) {
+        Column(Modifier.widthIn(max = 840.dp).fillMaxWidth().fillMaxHeight().align(Alignment.TopCenter).padding(horizontal = 18.dp)) {
+            Spacer(Modifier.height(18.dp))
+            Text(title, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+            subtitle?.let { Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            Spacer(Modifier.height(16.dp))
+            body()
+        }
     }
 }
 
 @Composable private fun StockScreen(vm: MerchViewModel, editor: Product?, onEdit: (Product?) -> Unit) {
     val catalog by vm.products.collectAsState()
     val products = catalog?.getOrNull().orEmpty()
+    val categories by vm.categories.collectAsState()
+    val lowStockThreshold by vm.lowStockThreshold.collectAsState()
     val context = LocalContext.current
     val listState = rememberLazyListState()
     var query by rememberSaveable { mutableStateOf("") }
     var lowOnly by rememberSaveable { mutableStateOf(false) }
+    var categoryKey by rememberSaveable { mutableStateOf("all") }
+    var sort by rememberSaveable { mutableStateOf(ProductSort.NAME) }
+    var showThresholdDialog by rememberSaveable { mutableStateOf(false) }
     var pdf by rememberSaveable { mutableStateOf(false) }
     var transfer by rememberSaveable { mutableStateOf(false) }
     var includePhotos by rememberSaveable { mutableStateOf(true) }
@@ -247,7 +288,9 @@ private fun launchApkInstaller(activity: Activity, apk: File) {
         ProductEditor(editor, vm) { onEdit(null) }
         return
     }
-    val visible = products.filter { it.matches(query) && (!lowOnly || it.stock <= LOW_STOCK) }
+    val visible = remember(products, query, categoryKey, lowOnly, lowStockThreshold, sort) {
+        filterAndSortProducts(products, query, categoryKey, lowOnly, lowStockThreshold, sort)
+    }
     Page("Склад") {
         LazyColumn(state = listState, verticalArrangement = Arrangement.spacedBy(10.dp), contentPadding = PaddingValues(bottom = 16.dp)) {
             item {
@@ -277,9 +320,20 @@ private fun launchApkInstaller(activity: Activity, apk: File) {
             }
             if (busy) item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
             message?.let { status -> item { Text(status, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
-            item { Field("Поиск по названию или коду", query) { query = it } }
-            item { FilterChip(lowOnly, { lowOnly = !lowOnly }, { Text("Заканчиваются товары") }) }
-            if (catalog == null || catalog?.isFailure == true) item { CatalogStatus(catalog) }
+            item { SearchField("Поиск по названию или коду", query) { query = it } }
+            item { CategoryFilterRow(categories, categoryKey) { categoryKey = it } }
+            item {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(lowOnly, { lowOnly = !lowOnly }, { Text("Остаток ≤ $lowStockThreshold") })
+                    TextButton(onClick = { showThresholdDialog = true }) {
+                        Icon(Icons.Default.Tune, contentDescription = null)
+                        Spacer(Modifier.width(4.dp))
+                        Text("Порог")
+                    }
+                }
+            }
+            item { ProductSortMenu(sort) { sort = it } }
+            if (catalog == null || catalog?.isFailure == true) item { CatalogStatus(catalog) { vm.retryProducts() } }
             else if (visible.isEmpty()) item {
                 Empty(when {
                     products.isEmpty() -> "Добавьте товар в каталоге, чтобы увидеть его остаток."
@@ -287,9 +341,17 @@ private fun launchApkInstaller(activity: Activity, apk: File) {
                     else -> "Нет товаров с остатком 5 шт. или меньше."
                 })
             }
-            items(visible, key = { it.id }) { ProductRow(it) { onEdit(it) } }
+            items(visible, key = { it.id }) { ProductRow(it, lowStockThreshold) { onEdit(it) } }
         }
     }
+    if (showThresholdDialog) LowStockThresholdDialog(
+        value = lowStockThreshold,
+        dismiss = { showThresholdDialog = false },
+        save = { value ->
+            vm.setLowStockThreshold(value)
+            showThresholdDialog = false
+        }
+    )
     if (pdf) {
         ModalBottomSheet(onDismissRequest = { pdf = false }) {
             Column(
@@ -344,10 +406,70 @@ private fun launchApkInstaller(activity: Activity, apk: File) {
     }
 }
 
-private const val LOW_STOCK = 5
+private const val DEFAULT_LOW_STOCK = 5
 
 private fun Product.matches(query: String): Boolean =
     name.contains(query.trim(), ignoreCase = true) || sku.contains(query.trim(), ignoreCase = true)
+
+@Composable private fun SearchField(label: String, value: String, onChange: (String) -> Unit) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = onChange,
+        label = { Text(label) },
+        singleLine = true,
+        trailingIcon = if (value.isBlank()) null else ({
+            IconButton(onClick = { onChange("") }) { Icon(Icons.Default.Close, contentDescription = "Очистить поиск") }
+        }),
+        modifier = Modifier.fillMaxWidth()
+    )
+}
+
+@Composable private fun CategoryFilterRow(categories: List<Category>, categoryKey: String, onSelect: (String) -> Unit) {
+    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FilterChip(categoryKey == "all", { onSelect("all") }, label = { Text("Все типы") })
+        FilterChip(categoryKey == "none", { onSelect("none") }, label = { Text("Без типа") })
+        categories.forEach { category ->
+            FilterChip(categoryKey == category.id.toString(), { onSelect(category.id.toString()) }, label = { Text(category.name) })
+        }
+    }
+}
+
+@Composable private fun ProductSortMenu(sort: ProductSort, onSelect: (ProductSort) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        TextButton(onClick = { expanded = true }) {
+            Icon(Icons.Default.Sort, contentDescription = null)
+            Spacer(Modifier.width(6.dp))
+            Text(sort.label)
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            ProductSort.entries.forEach { option ->
+                DropdownMenuItem(
+                    text = { Text(option.label) },
+                    onClick = { onSelect(option); expanded = false },
+                    leadingIcon = if (sort == option) ({ Icon(Icons.Default.Check, contentDescription = null) }) else null
+                )
+            }
+        }
+    }
+}
+
+@Composable private fun LowStockThresholdDialog(value: Int, dismiss: () -> Unit, save: (Int) -> Unit) {
+    var input by rememberSaveable(value) { mutableStateOf(value.toString()) }
+    val parsed = input.toIntOrNull()?.takeIf { it in 0..1_000_000 }
+    AlertDialog(
+        onDismissRequest = dismiss,
+        title = { Text("Порог низкого остатка") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Товары с таким остатком или меньше будут отмечены как заканчивающиеся.")
+                Field("Количество, шт.", input, KeyboardType.Number, if (parsed == null) "Введите целое число от 0 до 1 000 000." else null) { input = it }
+            }
+        },
+        confirmButton = { PrimaryAction({ parsed?.let(save) }, enabled = parsed != null) { Text("Сохранить") } },
+        dismissButton = { QuietAction(dismiss) { Text("Отмена") } }
+    )
+}
 
 @Composable private fun SettingStepper(title: String, value: Int, range: IntRange, onChange: (Int) -> Unit) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -371,8 +493,14 @@ private fun shareBackup(context: android.content.Context, uri: android.net.Uri) 
 @Composable private fun ProductScreen(vm: MerchViewModel, editor: Product?, onEdit: (Product?) -> Unit) {
     val catalog by vm.products.collectAsState()
     val products = catalog?.getOrNull().orEmpty()
+    val categories by vm.categories.collectAsState()
+    val lowStockThreshold by vm.lowStockThreshold.collectAsState()
     val listState = rememberLazyListState()
     var query by rememberSaveable { mutableStateOf("") }
+    var categoryKey by rememberSaveable { mutableStateOf("all") }
+    var lowOnly by rememberSaveable { mutableStateOf(false) }
+    var sort by rememberSaveable { mutableStateOf(ProductSort.NAME) }
+    var showThresholdDialog by rememberSaveable { mutableStateOf(false) }
     var addCategory by rememberSaveable { mutableStateOf(false) }
     if (editor != null) {
         ProductEditor(editor, vm) { onEdit(null) }
@@ -391,23 +519,39 @@ private fun shareBackup(context: android.content.Context, uri: android.net.Uri) 
             }
         )
         Spacer(Modifier.height(12.dp))
-        Field("Поиск по названию или коду", query) { query = it }
-        Spacer(Modifier.height(12.dp))
-        val visible = products.filter { it.matches(query) }
+        SearchField("Поиск по названию или коду", query) { query = it }
+        Spacer(Modifier.height(8.dp))
+        CategoryFilterRow(categories, categoryKey) { categoryKey = it }
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(lowOnly, { lowOnly = !lowOnly }, { Text("Остаток ≤ $lowStockThreshold") })
+            TextButton(onClick = { showThresholdDialog = true }) { Icon(Icons.Default.Tune, null); Spacer(Modifier.width(4.dp)); Text("Порог") }
+        }
+        ProductSortMenu(sort) { sort = it }
+        val visible = remember(products, query, categoryKey, lowOnly, lowStockThreshold, sort) {
+            filterAndSortProducts(products, query, categoryKey, lowOnly, lowStockThreshold, sort)
+        }
         if (catalog == null || catalog?.isFailure == true) {
-            CatalogStatus(catalog)
+            CatalogStatus(catalog) { vm.retryProducts() }
         } else if (visible.isEmpty()) {
-            Empty(if (products.isEmpty()) "Добавьте первый товар, чтобы начать продажи." else "Товары по этому запросу не найдены.")
+            Empty(if (products.isEmpty()) "Добавьте первый товар, чтобы начать продажи." else "Товары не найдены. Очистите поиск или измените фильтры.")
         } else {
-            LazyColumn(state = listState, verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(bottom = 16.dp)) {
-                items(visible, key = { it.id }) { ProductRow(it) { onEdit(it) } }
+            LazyColumn(Modifier.weight(1f), state = listState, verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(bottom = 16.dp)) {
+                items(visible, key = { it.id }) { ProductRow(it, lowStockThreshold) { onEdit(it) } }
             }
         }
     }
     if (addCategory) CategoryDialog(vm) { addCategory = false }
+    if (showThresholdDialog) LowStockThresholdDialog(
+        lowStockThreshold,
+        dismiss = { showThresholdDialog = false },
+        save = { value ->
+            vm.setLowStockThreshold(value)
+            showThresholdDialog = false
+        }
+    )
 }
 
-@Composable private fun ProductRow(product: Product, onClick: () -> Unit) {
+@Composable private fun ProductRow(product: Product, lowStockThreshold: Int = DEFAULT_LOW_STOCK, onClick: () -> Unit) {
     Card(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(
@@ -431,7 +575,7 @@ private fun shareBackup(context: android.content.Context, uri: android.net.Uri) 
                 Text(
                     "${product.stock}\u00a0шт.",
                     style = MaterialTheme.typography.bodySmall,
-                    color = if (product.stock <= LOW_STOCK) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
+                    color = if (product.stock <= lowStockThreshold) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }
@@ -453,12 +597,21 @@ private fun shareBackup(context: android.content.Context, uri: android.net.Uri) 
     var confirmDelete by remember { mutableStateOf(false) }
     var submitted by rememberSaveable { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
+    var confirmDiscard by rememberSaveable { mutableStateOf(false) }
     var codeError by remember { mutableStateOf<String?>(null) }
     var message by remember { mutableStateOf<String?>(null) }
     val priceValue = price.parsePriceKopecks()
     val vatValue = vat.decimal()?.takeIf { it in 0.0..100.0 }
     val stockValue = stock.trim().toIntOrNull()?.takeIf { it >= 0 }
     val total = if (priceValue != null && vatValue != null) kopecksWithVat(priceValue, vatValue) else null
+    val isDirty = sku != initial.sku || name != initial.name || description != initial.description ||
+        priceValue != initial.priceKopecks || vatValue != initial.vatRate || stockValue != initial.stock ||
+        categoryId != initial.categoryId || photoUri != initial.photoUri
+    val requestDismiss = {
+        if (!busy) {
+            if (isDirty) confirmDiscard = true else dismiss()
+        }
+    }
     val skuError = codeError ?: when {
         submitted && sku.isBlank() -> "Введите код товара."
         submitted && sku.trim().length > 256 -> "Сократите код до 256 символов."
@@ -477,11 +630,11 @@ private fun shareBackup(context: android.content.Context, uri: android.net.Uri) 
         }
     }
 
-    BackHandler { if (!busy) dismiss() }
+    BackHandler(enabled = !busy) { requestDismiss() }
     Column(Modifier.fillMaxSize().imePadding().padding(horizontal = 18.dp)) {
         TopAppBar(
             title = { Text(if (initial.id == 0L) "Новый товар" else "Карточка товара") },
-            navigationIcon = { IconButton(dismiss, enabled = !busy) { Icon(Icons.Default.ArrowBack, "Назад") } },
+            navigationIcon = { IconButton(requestDismiss, enabled = !busy) { Icon(Icons.Default.ArrowBack, "Назад") } },
             colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background)
         )
         LazyColumn(
@@ -570,6 +723,13 @@ private fun shareBackup(context: android.content.Context, uri: android.net.Uri) 
         }, destructive = true) { Text("Удалить товар") } },
         dismissButton = { QuietAction({ confirmDelete = false }) { Text("Отмена") } }
     )
+    if (confirmDiscard) AlertDialog(
+        onDismissRequest = { confirmDiscard = false },
+        title = { Text("Отбросить изменения?") },
+        text = { Text("Введённые изменения не будут сохранены.") },
+        confirmButton = { PrimaryAction({ confirmDiscard = false; dismiss() }, destructive = true) { Text("Выйти без сохранения") } },
+        dismissButton = { QuietAction({ confirmDiscard = false }) { Text("Продолжить редактирование") } }
+    )
 }
 
 private fun String.decimal(): Double? = trim().replace(',', '.').toDoubleOrNull()?.takeIf { it.isFinite() }
@@ -580,9 +740,12 @@ private fun String.decimal(): Double? = trim().replace(',', '.').toDoubleOrNull(
     keyboard: KeyboardType = KeyboardType.Text,
     error: String? = null,
     singleLine: Boolean = true,
+    imeAction: ImeAction = ImeAction.Default,
+    onIme: (() -> Unit)? = null,
     onChange: (String) -> Unit
 ) = OutlinedTextField(
-    value, onChange, label = { Text(label) }, keyboardOptions = KeyboardOptions(keyboardType = keyboard),
+    value, onChange, label = { Text(label) }, keyboardOptions = KeyboardOptions(keyboardType = keyboard, imeAction = imeAction),
+    keyboardActions = KeyboardActions(onDone = { onIme?.invoke() }),
     singleLine = singleLine, isError = error != null, supportingText = error?.let { { Text(it) } },
     modifier = Modifier.fillMaxWidth()
 )
@@ -617,7 +780,7 @@ private fun String.decimal(): Double? = trim().replace(',', '.').toDoubleOrNull(
     val draft by vm.draft.collectAsState()
     val isClosing by vm.isClosingSale.collectAsState()
     val context = LocalContext.current
-    val focusManager = LocalFocusManager.current
+    val haptic = LocalHapticFeedback.current
     val hasCamera = remember(context) {
         context.packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA)
     }
@@ -631,8 +794,9 @@ private fun String.decimal(): Double? = trim().replace(',', '.').toDoubleOrNull(
             message = error
             if (error == null) {
                 code = ""
-                focusManager.clearFocus()
+                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
             }
+            if (scanner) Toast.makeText(context, error ?: "Добавлено в чек", Toast.LENGTH_SHORT).show()
         }
     }
     Page("Касса", if (draft.isEmpty()) "Новый чек" else "В чеке · ${draft.sumOf { it.quantity }}\u00a0шт.", Modifier.imePadding()) {
@@ -654,7 +818,7 @@ private fun String.decimal(): Double? = trim().replace(',', '.').toDoubleOrNull(
                 }
             }
             item {
-                Field("Код товара", code) { code = it; message = null }
+                Field("Код товара", code, imeAction = ImeAction.Done, onIme = { if (code.isNotBlank()) addCode(code) }) { code = it; message = null }
             }
             item {
                 SecondaryAction({ addCode(code) }, Modifier.fillMaxWidth(), enabled = code.isNotBlank() && !isClosing) {
@@ -667,7 +831,7 @@ private fun String.decimal(): Double? = trim().replace(',', '.').toDoubleOrNull(
             }
             val available = products.filter { it.stock > 0 && it.matches(code) }
             if (available.isNotEmpty()) item { Text("Товары в наличии", style = MaterialTheme.typography.titleMedium) }
-            if (catalog == null || catalog?.isFailure == true) item { CatalogStatus(catalog) }
+            if (catalog == null || catalog?.isFailure == true) item { CatalogStatus(catalog) { vm.retryProducts() } }
             else if (draft.isEmpty() && available.isEmpty()) item {
                 Empty(if (products.isEmpty()) "Добавьте товары в каталоге, чтобы начать продажу." else "Нет подходящих товаров в наличии.")
             }
@@ -687,7 +851,7 @@ private fun String.decimal(): Double? = trim().replace(',', '.').toDoubleOrNull(
             }
         }
     }
-    if (scanner && hasCamera) ScannerDialog(onCode = { scanner = false; addCode(it) }, onDismiss = { scanner = false })
+    if (scanner && hasCamera) ScannerDialog(onCode = { addCode(it) }, onDismiss = { scanner = false })
     if (checkout) CheckoutDialog(total, isClosing, onDismiss = { if (!isClosing) checkout = false }, onPay = { payment, note ->
         vm.closeSale(payment, note, completed = { checkout = false }, failed = { message = it; checkout = false })
     })
@@ -769,24 +933,258 @@ private fun String.decimal(): Double? = trim().replace(',', '.').toDoubleOrNull(
     )
 }
 
+private const val HISTORY_PAGE_SIZE = 40
+
+@Composable private fun DatePresetRow(selected: DatePreset, includeAllTime: Boolean = true, onSelect: (DatePreset) -> Unit) {
+    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        DatePreset.entries.filter { includeAllTime || it != DatePreset.ALL_TIME }.forEach { preset ->
+            FilterChip(selected == preset, { onSelect(preset) }, label = { Text(preset.label) })
+        }
+    }
+}
+
 @Composable private fun HistoryScreen(vm: MerchViewModel) {
-    val sales by vm.sales.collectAsState(); var edit by remember { mutableStateOf<Sale?>(null) }
-    Page("История продаж", pluralStringResource(R.plurals.receipt_count, sales.size, sales.size)) { if (sales.isEmpty()) Empty("Закрытые чеки появятся здесь.") else LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(bottom = 24.dp)) { items(sales, key = { it.id }) { sale -> Card(Modifier.fillMaxWidth().clickable { edit = sale }) { Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) { Icon(if (sale.paymentType == PaymentType.CARD) Icons.Default.CreditCard else Icons.Default.Payments, null, tint = MaterialTheme.colorScheme.primary); Spacer(Modifier.width(12.dp)); Column(Modifier.weight(1f)) { Text("Чек №\u00A0${sale.id}", fontWeight = FontWeight.SemiBold); Text(DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(sale.createdAt)), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }; Text(money(sale.totalKopecks), fontWeight = FontWeight.Bold) } } } } }
+    var edit by remember { mutableStateOf<Sale?>(null) }
+    var query by rememberSaveable { mutableStateOf("") }
+    var range by rememberSaveable { mutableStateOf(DatePreset.ALL_TIME) }
+    var paymentName by rememberSaveable { mutableStateOf("") }
+    var sales by remember { mutableStateOf<List<Sale>>(emptyList()) }
+    var loading by remember { mutableStateOf(true) }
+    var loadingMore by remember { mutableStateOf(false) }
+    var hasMore by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var reloadKey by remember { mutableIntStateOf(0) }
+    val window = remember(range) { range.window(System.currentTimeMillis()) }
+    val scope = rememberCoroutineScope()
+
+    LaunchedEffect(query, range, paymentName, reloadKey) {
+        kotlinx.coroutines.delay(250)
+        sales = emptyList()
+        hasMore = false
+        loading = true
+        error = null
+        try {
+            val result = vm.salesPage(window.from, window.toExclusive, paymentName, query.trim(), HISTORY_PAGE_SIZE + 1, 0)
+            sales = result.take(HISTORY_PAGE_SIZE)
+            hasMore = result.size > HISTORY_PAGE_SIZE
+        } catch (failure: Exception) {
+            if (failure is kotlinx.coroutines.CancellationException) throw failure
+            error = "Не удалось загрузить историю. Повторите попытку."
+        } finally {
+            loading = false
+        }
+    }
+
+    Page("История продаж", if (loading && sales.isEmpty()) "Загружаем чеки…" else pluralStringResource(R.plurals.receipt_count, sales.size, sales.size)) {
+        SearchField("Поиск по номеру или комментарию", query) { query = it }
+        Spacer(Modifier.height(4.dp))
+        DatePresetRow(range) { range = it }
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(paymentName.isEmpty(), { paymentName = "" }, label = { Text("Любая оплата") })
+            FilterChip(paymentName == PaymentType.CARD.name, { paymentName = PaymentType.CARD.name }, label = { Text("Карта") })
+            FilterChip(paymentName == PaymentType.CASH.name, { paymentName = PaymentType.CASH.name }, label = { Text("Наличные") })
+        }
+        when {
+            loading && sales.isEmpty() -> LinearProgressIndicator(Modifier.fillMaxWidth())
+            error != null && sales.isEmpty() -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(error!!, color = MaterialTheme.colorScheme.error)
+                SecondaryAction({ reloadKey++ }) { Text("Повторить") }
+            }
+            sales.isEmpty() -> Empty(if (query.isBlank() && paymentName.isBlank()) "За выбранный период чеков нет." else "Чеки не найдены. Измените запрос или фильтры.")
+            else -> LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(bottom = 24.dp)) {
+                items(sales, key = { it.id }) { sale ->
+                    Card(onClick = { edit = sale }, modifier = Modifier.fillMaxWidth()) {
+                        Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Icon(if (sale.paymentType == PaymentType.CARD) Icons.Default.CreditCard else Icons.Default.Payments, null, tint = MaterialTheme.colorScheme.primary)
+                            Spacer(Modifier.width(12.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text("Чек №\u00A0${sale.id}", fontWeight = FontWeight.SemiBold)
+                                Text(DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(sale.createdAt)), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            Text(money(sale.totalKopecks), fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+                if (hasMore) item {
+                    if (loadingMore) LinearProgressIndicator(Modifier.fillMaxWidth())
+                    else SecondaryAction(
+                        onClick = {
+                            scope.launch {
+                                loadingMore = true
+                                error = null
+                                try {
+                                    val result = vm.salesPage(window.from, window.toExclusive, paymentName, query.trim(), HISTORY_PAGE_SIZE + 1, sales.size)
+                                    sales = sales + result.take(HISTORY_PAGE_SIZE)
+                                    hasMore = result.size > HISTORY_PAGE_SIZE
+                                } catch (failure: Exception) {
+                                    if (failure is kotlinx.coroutines.CancellationException) throw failure
+                                    error = "Не удалось загрузить следующие чеки. Повторите попытку."
+                                } finally {
+                                    loadingMore = false
+                                }
+                            }
+                        }, modifier = Modifier.fillMaxWidth()
+                    ) { Text("Загрузить ещё") }
+                }
+                if (error != null) item { Text(error!!, color = MaterialTheme.colorScheme.error) }
+            }
+        }
+    }
     edit?.let { SaleEditor(it, vm, { edit = null }) }
 }
 
-@Composable private fun SaleEditor(sale: Sale, vm: MerchViewModel, dismiss: () -> Unit) { var payment by remember { mutableStateOf(sale.paymentType) }; var note by remember { mutableStateOf(sale.note) }; var lines by remember { mutableStateOf<List<SaleLine>?>(null) }; LaunchedEffect(sale.id) { lines = vm.saleLines(sale.id) }; AlertDialog(onDismissRequest = dismiss, title = { Text("Чек №\u00A0${sale.id}") }, text = { Column(Modifier.verticalScroll(rememberScrollState())) { Text(DateFormat.getDateTimeInstance().format(Date(sale.createdAt)), color = MaterialTheme.colorScheme.onSurfaceVariant); lines?.forEach { Text("${it.productName} × ${it.quantity} — ${money(it.lineTotalKopecks)}", modifier = Modifier.padding(top = 6.dp)) }; Spacer(Modifier.height(8.dp)); PaymentChoices(payment) { payment = it }; Field("Комментарий", note, error = note.length.takeIf { it > 4096 }?.let { "Сократите комментарий до 4 096 символов." }) { note = it } } }, confirmButton = { PrimaryAction({ vm.updateSale(sale.id, payment, note.trim()); dismiss() }, enabled = note.trim().length <= 4096) { Text("Сохранить") } }, dismissButton = { QuietAction(dismiss) { Text("Закрыть") } }) }
+@Composable private fun SaleEditor(sale: Sale, vm: MerchViewModel, dismiss: () -> Unit) {
+    val context = LocalContext.current
+    var payment by remember(sale.id) { mutableStateOf(sale.paymentType) }
+    var note by remember(sale.id) { mutableStateOf(sale.note) }
+    var lines by remember(sale.id) { mutableStateOf<List<SaleLine>?>(null) }
+    var loadFailed by remember(sale.id) { mutableStateOf(false) }
+    LaunchedEffect(sale.id) {
+        try { lines = vm.saleLines(sale.id) } catch (failure: Exception) {
+            if (failure is kotlinx.coroutines.CancellationException) throw failure
+            loadFailed = true
+        }
+    }
+    fun shareReceipt() {
+        val body = buildString {
+            appendLine("Чек № ${sale.id}")
+            appendLine(DateFormat.getDateTimeInstance().format(Date(sale.createdAt)))
+            lines.orEmpty().forEach { appendLine("${it.productName} × ${it.quantity} — ${money(it.lineTotalKopecks)}") }
+            appendLine("Оплата: ${if (payment == PaymentType.CARD) "карта" else "наличные"}")
+            appendLine("Итого: ${money(sale.totalKopecks)}")
+            if (note.isNotBlank()) append("Комментарий: ${note.trim()}")
+        }
+        val intent = Intent(Intent.ACTION_SEND).apply { type = "text/plain"; putExtra(Intent.EXTRA_TEXT, body) }
+        context.startActivity(Intent.createChooser(intent, "Поделиться чеком"))
+    }
+    AlertDialog(
+        onDismissRequest = dismiss,
+        title = { Text("Чек №\u00A0${sale.id}") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(DateFormat.getDateTimeInstance().format(Date(sale.createdAt)), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                when {
+                    lines != null -> lines!!.forEach { Text("${it.productName} × ${it.quantity} — ${money(it.lineTotalKopecks)}") }
+                    loadFailed -> Text("Не удалось загрузить состав чека.", color = MaterialTheme.colorScheme.error)
+                    else -> LinearProgressIndicator(Modifier.fillMaxWidth())
+                }
+                Text("Итого: ${money(sale.totalKopecks)}", fontWeight = FontWeight.Bold)
+                PaymentChoices(payment) { payment = it }
+                Field("Комментарий", note, error = note.length.takeIf { it > 4096 }?.let { "Сократите комментарий до 4 096 символов." }) { note = it }
+                SecondaryAction(::shareReceipt, Modifier.fillMaxWidth(), enabled = lines != null) {
+                    Icon(Icons.Default.Share, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Поделиться чеком")
+                }
+            }
+        },
+        confirmButton = { PrimaryAction({ vm.updateSale(sale.id, payment, note.trim()); dismiss() }, enabled = note.trim().length <= 4096) { Text("Сохранить") } },
+        dismissButton = { QuietAction(dismiss) { Text("Закрыть") } }
+    )
+}
 
-@Composable private fun AnalyticsScreen(vm: MerchViewModel) { val metrics by vm.todayMetrics.collectAsState(); val (turnover, count) = metrics; val catalog by vm.products.collectAsState(); val products = catalog?.getOrNull().orEmpty(); val sales by vm.sales.collectAsState(); Page("Аналитика", "Показатели за сегодня") { Column(Modifier.verticalScroll(rememberScrollState())) { Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) { MetricCard("Выручка", money(turnover), Modifier.weight(1f)); MetricCard("Продажи", count.toString(), Modifier.weight(1f)) }; Spacer(Modifier.height(20.dp)); Text("Сводка", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold); Spacer(Modifier.height(8.dp)); Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) { SummaryRow("Средний чек", money(averageKopecks(turnover, count))); SummaryRow("Товаров в каталоге", products.size.toString()); SummaryRow("Чеков всего", sales.size.toString()); SummaryRow("Позиций с низким остатком", products.count { it.stock <= LOW_STOCK }.toString()) } } } }
+@Composable private fun AnalyticsScreen(vm: MerchViewModel) {
+    var range by rememberSaveable { mutableStateOf(DatePreset.TODAY) }
+    val window = remember(range) { range.window(System.currentTimeMillis()) }
+    val analyticsFlow = remember(window.from, window.toExclusive) { vm.analytics(window.from, window.toExclusive) }
+    val snapshot by analyticsFlow.collectAsState(initial = null)
+    val catalog by vm.products.collectAsState()
+    val products = catalog?.getOrNull().orEmpty()
+    val lowStockThreshold by vm.lowStockThreshold.collectAsState()
 
+    Page("Аналитика", "Показатели: ${range.label}") {
+        DatePresetRow(range, includeAllTime = false) { range = it }
+        Spacer(Modifier.height(8.dp))
+        if (snapshot == null) {
+            LinearProgressIndicator(Modifier.fillMaxWidth())
+        } else {
+            val data = snapshot!!
+            Column(Modifier.weight(1f).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    MetricCard("Выручка", money(data.summary.turnoverKopecks), Modifier.weight(1f))
+                    MetricCard("Продажи", data.summary.count.toString(), Modifier.weight(1f))
+                }
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Сводка", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                        SummaryRow("Средний чек", money(averageKopecks(data.summary.turnoverKopecks.toBigInteger(), data.summary.count)))
+                        SummaryRow("Товаров в каталоге", products.size.toString())
+                        SummaryRow("Позиций с низким остатком", products.count { it.stock <= lowStockThreshold }.toString())
+                    }
+                }
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Выручка по дням", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                        SalesTrendChart(data.dailySales)
+                    }
+                }
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text("Популярные товары", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                        if (data.topProducts.isEmpty()) Text("За этот период продаж ещё нет.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        else {
+                            val maxQuantity = data.topProducts.maxOf { it.quantity }.coerceAtLeast(1L).toFloat()
+                            data.topProducts.forEach { product ->
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(product.productName, Modifier.weight(1f), fontWeight = FontWeight.Medium)
+                                    Text("${product.quantity} шт.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                                LinearProgressIndicator(product.quantity / maxQuantity, Modifier.fillMaxWidth())
+                                Text(money(product.revenueKopecks), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable private fun SalesTrendChart(dailySales: List<DailySales>) {
+    if (dailySales.isEmpty()) {
+        Text("За этот период продаж ещё нет.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        return
+    }
+    val color = MaterialTheme.colorScheme.primary
+    val maxTurnover = dailySales.maxOf { it.turnoverKopecks }.coerceAtLeast(1L).toFloat()
+    val chartDescription = dailySales.joinToString("; ") {
+        "${DateFormat.getDateInstance(DateFormat.SHORT).format(Date(it.dayStart))}: ${money(it.turnoverKopecks)}"
+    }
+    Canvas(
+        Modifier.fillMaxWidth().height(140.dp).semantics { contentDescription = "Выручка по дням. $chartDescription" }
+    ) {
+        val gap = 6.dp.toPx()
+        val barWidth = ((size.width - gap * (dailySales.size + 1)) / dailySales.size).coerceAtLeast(2.dp.toPx())
+        dailySales.forEachIndexed { index, item ->
+            val height = (size.height * (item.turnoverKopecks.toFloat() / maxTurnover)).coerceAtLeast(3.dp.toPx())
+            drawRect(
+                color = color,
+                topLeft = androidx.compose.ui.geometry.Offset(gap + index * (barWidth + gap), size.height - height),
+                size = androidx.compose.ui.geometry.Size(barWidth, height)
+            )
+        }
+    }
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        Text(DateFormat.getDateInstance(DateFormat.SHORT).format(Date(dailySales.first().dayStart)), style = MaterialTheme.typography.bodySmall)
+        if (dailySales.size > 1) Text(DateFormat.getDateInstance(DateFormat.SHORT).format(Date(dailySales.last().dayStart)), style = MaterialTheme.typography.bodySmall)
+    }
 }
 
 @Composable private fun ReceiptClosed(sale: Sale, dismiss: () -> Unit) = Surface(Modifier.fillMaxSize().background(Color(0xCC0F1B32)), color = Color.Transparent) { Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Card(Modifier.padding(28.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) { Column(Modifier.padding(28.dp), horizontalAlignment = Alignment.CenterHorizontally) { Icon(painterResource(R.drawable.lucide_check), null, Modifier.size(56.dp), tint = MaterialTheme.colorScheme.primary); Spacer(Modifier.height(12.dp)); Text("Продажа сохранена", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold); Text("Чек №\u00A0${sale.id} · ${money(sale.totalKopecks)}", color = MaterialTheme.colorScheme.onPrimaryContainer); Spacer(Modifier.height(18.dp)); PrimaryAction(dismiss) { Text("Готово") } } } } }
 @Composable private fun MetricCard(label: String, value: String, modifier: Modifier = Modifier) = Card(modifier) { Column(Modifier.padding(14.dp)) { Text(value, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold); Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
 @Composable private fun SummaryRow(label: String, value: String) = Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) { Text(label, Modifier.weight(1f)); Text(value, fontWeight = FontWeight.SemiBold) }
-@Composable private fun CatalogStatus(catalog: Result<List<Product>>?) {
-    if (catalog == null) LinearProgressIndicator(Modifier.fillMaxWidth())
-    else Empty("Не удалось загрузить товары. Откройте приложение заново.")
+@Composable private fun CatalogStatus(catalog: Result<List<Product>>?, onRetry: () -> Unit) {
+    if (catalog == null) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            LinearProgressIndicator(Modifier.fillMaxWidth())
+            Text("Загружаем каталог…", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    } else {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Не удалось загрузить товары. Проверьте хранилище приложения и повторите попытку.", color = MaterialTheme.colorScheme.error)
+            SecondaryAction(onRetry) { Text("Повторить загрузку") }
+        }
+    }
 }
 
 @Composable private fun Empty(text: String) = Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) { Text(text, color = MaterialTheme.colorScheme.onSurfaceVariant) }

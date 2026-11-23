@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.merchseller.data.*
 import android.net.Uri
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -15,24 +16,24 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import java.math.BigInteger
 
 class MerchViewModel(application: Application) : AndroidViewModel(application) {
     private val dao = AppDatabase.create(application).dao()
-    val products: StateFlow<Result<List<Product>>?> = dao.products()
-        .map { Result.success(it) }
-        .catch { emit(Result.failure(it)) }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+    private val uiPreferences = application.getSharedPreferences("merchseller_ui", 0)
+    private val _lowStockThreshold = MutableStateFlow(uiPreferences.getInt("low_stock_threshold", 5))
+    val lowStockThreshold = _lowStockThreshold.asStateFlow()
+    private val catalogReload = MutableStateFlow(0)
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    val products: StateFlow<Result<List<Product>>?> = catalogReload.flatMapLatest {
+        dao.products().map<List<Product>, Result<List<Product>>> { Result.success(it) }
+            .catch { emit(Result.failure(it)) }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
     val categories = dao.categories().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
-    val sales = dao.sales().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
-    val todayMetrics = dao.receiptTotals(todayStart()).map { receipts ->
-        val turnover = receipts.fold(BigInteger.ZERO) { total, amount -> total.add(amount.toBigInteger()) }
-        turnover to receipts.size
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), BigInteger.ZERO to 0)
 
     private val _draft = MutableStateFlow<List<DraftLine>>(emptyList())
     val draft: StateFlow<List<DraftLine>> = _draft.asStateFlow()
@@ -44,6 +45,23 @@ class MerchViewModel(application: Application) : AndroidViewModel(application) {
     val lastClosed: StateFlow<Sale?> = _lastClosed.asStateFlow()
     private val _update = MutableStateFlow<UpdateState>(UpdateState.Idle)
     val update = _update.asStateFlow()
+
+    fun retryProducts() { catalogReload.update { it + 1 } }
+
+    fun setLowStockThreshold(value: Int) {
+        if (value !in 0..1_000_000) return
+        uiPreferences.edit().putInt("low_stock_threshold", value).apply()
+        _lowStockThreshold.value = value
+    }
+
+    suspend fun salesPage(from: Long, toExclusive: Long, paymentName: String, query: String, limit: Int, offset: Int) =
+        dao.salesPage(from, toExclusive, paymentName, query, limit, offset)
+
+    fun analytics(from: Long, toExclusive: Long) = combine(
+        dao.salesSummary(from, toExclusive),
+        dao.topSellingProducts(from, toExclusive, 5),
+        dao.dailySales(from, toExclusive)
+    ) { summary, products, daily -> AnalyticsSnapshot(summary, products, daily) }
 
     fun saveProduct(product: Product, done: (Result<Unit>) -> Unit) = catalogAction(done) {
         if (product.id == 0L) dao.insertProduct(product)
@@ -176,5 +194,10 @@ class MerchViewModel(application: Application) : AndroidViewModel(application) {
         }
         done(result)
     }
-    private fun todayStart(): Long = java.util.Calendar.getInstance().apply { set(java.util.Calendar.HOUR_OF_DAY, 0); set(java.util.Calendar.MINUTE, 0); set(java.util.Calendar.SECOND, 0); set(java.util.Calendar.MILLISECOND, 0) }.timeInMillis
 }
+
+data class AnalyticsSnapshot(
+    val summary: SalesSummary,
+    val topProducts: List<TopSellingProduct>,
+    val dailySales: List<DailySales>
+)

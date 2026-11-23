@@ -29,7 +29,8 @@ interface MerchDao {
     @Query("SELECT * FROM categories ORDER BY name COLLATE NOCASE") fun categories(): Flow<List<Category>>
     @Query("SELECT * FROM categories ORDER BY id") suspend fun allCategories(): List<Category>
     @Insert suspend fun saveCategory(category: Category): Long
-    @Query("SELECT * FROM sales ORDER BY createdAt DESC") fun sales(): Flow<List<Sale>>
+    @Query("SELECT * FROM sales WHERE createdAt >= :from AND createdAt < :toExclusive AND (:paymentName = '' OR paymentType = :paymentName) AND (:query = '' OR CAST(id AS TEXT) LIKE '%' || :query || '%' OR note LIKE '%' || :query || '%') ORDER BY createdAt DESC, id DESC LIMIT :limit OFFSET :offset")
+    suspend fun salesPage(from: Long, toExclusive: Long, paymentName: String, query: String, limit: Int, offset: Int): List<Sale>
     @Query("SELECT * FROM products ORDER BY id") suspend fun allProducts(): List<Product>
     @Query("SELECT * FROM sales ORDER BY id") suspend fun allSales(): List<Sale>
     @Query("SELECT * FROM sale_lines ORDER BY id") suspend fun allLines(): List<SaleLine>
@@ -46,7 +47,12 @@ interface MerchDao {
     @Query("DELETE FROM categories") suspend fun clearCategories()
     @Query("UPDATE products SET stock = stock - :quantity, updatedAt = :time WHERE id = :productId AND stock >= :quantity") suspend fun decreaseStock(productId: Long, quantity: Int, time: Long): Int
     @Query("UPDATE sales SET paymentType = :type, note = :note WHERE id = :saleId") suspend fun updateSale(saleId: Long, type: PaymentType, note: String)
-    @Query("SELECT totalKopecks FROM sales WHERE createdAt >= :from") fun receiptTotals(from: Long): Flow<List<Long>>
+    @Query("SELECT COUNT(*) AS count, COALESCE(SUM(totalKopecks), 0) AS turnoverKopecks FROM sales WHERE createdAt >= :from AND createdAt < :toExclusive")
+    fun salesSummary(from: Long, toExclusive: Long): Flow<SalesSummary>
+    @Query("SELECT l.productName AS productName, SUM(l.quantity) AS quantity, SUM(l.lineTotalKopecks) AS revenueKopecks FROM sale_lines l INNER JOIN sales s ON s.id = l.saleId WHERE s.createdAt >= :from AND s.createdAt < :toExclusive GROUP BY l.productId, l.productName ORDER BY quantity DESC, revenueKopecks DESC LIMIT :limit")
+    fun topSellingProducts(from: Long, toExclusive: Long, limit: Int): Flow<List<TopSellingProduct>>
+    @Query("SELECT CAST(strftime('%s', date(createdAt / 1000, 'unixepoch', 'localtime')) AS INTEGER) * 1000 AS dayStart, SUM(totalKopecks) AS turnoverKopecks FROM sales WHERE createdAt >= :from AND createdAt < :toExclusive GROUP BY dayStart ORDER BY dayStart")
+    fun dailySales(from: Long, toExclusive: Long): Flow<List<DailySales>>
     @Query("SELECT EXISTS(SELECT 1 FROM products WHERE photoUri = :uri)") suspend fun usesPhoto(uri: String): Boolean
 
     @Transaction
@@ -86,6 +92,10 @@ interface MerchDao {
         saveAllLines(backup.lines)
     }
 }
+
+data class SalesSummary(val count: Int, val turnoverKopecks: Long)
+data class TopSellingProduct(val productName: String, val quantity: Long, val revenueKopecks: Long)
+data class DailySales(val dayStart: Long, val turnoverKopecks: Long)
 
 data class DraftLine(val product: Product, val quantity: Int) {
     val totalKopecks get() = product.totalPriceKopecks.multiply(quantity.toBigInteger())

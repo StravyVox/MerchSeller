@@ -4,6 +4,6 @@
         <item quantity="one">%d чек</item>
         <item quantity="few">%d чека</item>
         <item quantity="many">%d чеков</item>
-        <item quantity="other">%d чека</item>
+        <item quantity="other">%d чеков</item>
     </plurals>
 </resources>
